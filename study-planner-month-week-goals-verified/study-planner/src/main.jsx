@@ -52,7 +52,7 @@ function App(){
       if(!error)setData({tasks:rows.map(x=>({id:x.id,title:x.title,subject:x.subject||'',date:x.study_date,completed:!!x.completed,note:x.note||''}))});
       else setMessage('클라우드 데이터를 불러오지 못했어요. Supabase 설정과 SQL 실행 여부를 확인해 주세요.');
       const goalResult=await supabase.from('study_period_goals').select('goal_type,period_key,content');
-      if(!goalResult.error){const cloudGoals={};goalResult.data.forEach(g=>{cloudGoals[`${g.goal_type}:${g.period_key}`]=g.content});setPeriodGoals(prev=>({...prev,...cloudGoals}));}
+      if(!goalResult.error){const cloudGoals={};goalResult.data.forEach(g=>{cloudGoals[`${g.goal_type}:${g.period_key}`]=g.content});setPeriodGoals(prev=>({...Object.fromEntries(Object.entries(prev).filter(([key])=>!key.startsWith('week:'))),...cloudGoals}));}
       setLoading(false);
     })();
   },[user]);
@@ -75,14 +75,29 @@ function App(){
   async function saveWeeklyGoal(oldKey,start,end,content){
     if(!start||!end){setMessage('시작 날짜와 종료 날짜를 선택해 주세요.');return;}
     if(start>end){setMessage('종료 날짜는 시작 날짜와 같거나 이후여야 해요.');return;}
-    const newKey=`week:${start}~${end}`, clean=(content||'').trim();
-    setPeriodGoals(prev=>{const next={...prev};if(oldKey&&oldKey!==newKey)delete next[oldKey];next[newKey]=clean;return next;});
+    const newKey=`week:${start}~${end}`, newPeriodKey=`${start}~${end}`, clean=(content||'').trim();
+
+    // Save the new period first so the existing goal is preserved if saving fails.
     if(supabase&&user){
-      if(oldKey&&oldKey!==newKey){const oldPeriodKey=oldKey.slice(5);const {error:deleteError}=await supabase.from('study_period_goals').delete().eq('user_id',user.id).eq('goal_type','week').eq('period_key',oldPeriodKey);if(deleteError){setMessage('기존 주간 목표 날짜를 변경하지 못했어요.');return;}}
-      const {error}=await supabase.from('study_period_goals').upsert({user_id:user.id,goal_type:'week',period_key:`${start}~${end}`,content:clean},{onConflict:'user_id,goal_type,period_key'});
-      if(error){setMessage('주간 목표를 클라우드에 저장하지 못했어요.');return;}
+      const {error}=await supabase.from('study_period_goals').upsert(
+        {user_id:user.id,goal_type:'week',period_key:newPeriodKey,content:clean},
+        {onConflict:'user_id,goal_type,period_key'}
+      );
+      if(error){setMessage('주간 목표를 클라우드에 저장하지 못했어요: '+error.message);return;}
+
+      // Remove the old period only after the new one has been saved successfully.
+      if(oldKey&&oldKey!==newKey){
+        const oldPeriodKey=oldKey.slice(5);
+        const {error:deleteError}=await supabase.from('study_period_goals').delete()
+          .eq('user_id',user.id).eq('goal_type','week').eq('period_key',oldPeriodKey);
+        if(deleteError){setMessage('새 목표는 저장했지만 이전 기간의 목표 정리는 실패했어요. 새로고침 후 확인해 주세요.');return;}
+      }
     }
-    setGoalDrafts(prev=>({...prev,[newKey]:clean}));setSelectedDate(start);setMessage('주간 목표와 날짜를 저장했어요.');
+
+    setPeriodGoals(prev=>{const next={...prev};if(oldKey&&oldKey!==newKey)delete next[oldKey];next[newKey]=clean;return next;});
+    setGoalDrafts(prev=>({...prev,[newKey]:clean}));
+    setSelectedDate(start);
+    setMessage('주간 목표와 날짜를 저장했어요.');
   }
   async function saveTask(task){
     const clean={...task,title:task.title.trim(),subject:(task.subject||'').trim(),note:(task.note||'').trim()};
