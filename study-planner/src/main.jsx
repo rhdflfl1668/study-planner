@@ -10,7 +10,10 @@ const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPAB
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const dateKey = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const weekStartKey = value => { const d=new Date(`${value}T12:00:00`); d.setDate(d.getDate()-((d.getDay()+6)%7)); return dateKey(d); };
-const weekRangeLabel = value => { const start=new Date(`${weekStartKey(value)}T12:00:00`), end=new Date(start); end.setDate(end.getDate()+6); return `${start.getMonth()+1}/${start.getDate()}~${end.getMonth()+1}/${end.getDate()}`; };
+const weekRangeLabel = (startValue,endValue) => { const start=new Date(`${startValue}T12:00:00`), end=new Date(`${endValue}T12:00:00`); return `${start.getMonth()+1}/${start.getDate()}~${end.getMonth()+1}/${end.getDate()}`; };
+const addDaysKey = (value,amount) => { const d=new Date(`${value}T12:00:00`); d.setDate(d.getDate()+amount); return dateKey(d); };
+const parseWeekGoal = (key,content) => { const raw=key.slice(5), parts=raw.split('~'), start=parts[0], end=parts[1]||addDaysKey(start,6); return {key,start,end,content}; };
+const weeklyGoalList = goals => Object.entries(goals).filter(([key,value])=>key.startsWith('week:')&&String(value||'').trim()).map(([key,value])=>parseWeekGoal(key,value));
 const sample = () => ({ tasks: [
   {id:'t1',title:'영어 단어 20개 복습',subject:'영어',date:todayISO(),completed:true,note:''},
   {id:'t2',title:'전공 개념 정리',subject:'전공',date:todayISO(),completed:false,note:''}
@@ -49,7 +52,7 @@ function App(){
       if(!error)setData({tasks:rows.map(x=>({id:x.id,title:x.title,subject:x.subject||'',date:x.study_date,completed:!!x.completed,note:x.note||''}))});
       else setMessage('클라우드 데이터를 불러오지 못했어요. Supabase 설정과 SQL 실행 여부를 확인해 주세요.');
       const goalResult=await supabase.from('study_period_goals').select('goal_type,period_key,content');
-      if(!goalResult.error){const cloudGoals={};goalResult.data.forEach(g=>{cloudGoals[`${g.goal_type}:${g.period_key}`]=g.content});setPeriodGoals(prev=>({...prev,...cloudGoals}));}
+      if(!goalResult.error){const cloudGoals={};goalResult.data.forEach(g=>{cloudGoals[`${g.goal_type}:${g.period_key}`]=g.content});setPeriodGoals(prev=>({...Object.fromEntries(Object.entries(prev).filter(([key])=>!key.startsWith('week:'))),...cloudGoals}));}
       setLoading(false);
     })();
   },[user]);
@@ -58,12 +61,43 @@ function App(){
   const dayTasks=data.tasks.filter(t=>t.date===selectedDate);
   const monthTasks=data.tasks.filter(t=>t.date?.startsWith(`${year}-${String(month).padStart(2,'0')}`));
   const monthGoalKey=`month:${year}-${String(month).padStart(2,'0')}`;
-  const weekGoalKey=`week:${weekStartKey(selectedDate)}`;
+  const weeklyGoals=weeklyGoalList(periodGoals);
+  const activeWeekGoal=weeklyGoals.find(g=>g.start<=selectedDate&&g.end>=selectedDate);
+  const defaultWeekStart=weekStartKey(selectedDate), defaultWeekEnd=addDaysKey(defaultWeekStart,6);
+  const weekGoalKey=activeWeekGoal?activeWeekGoal.key:`week:${defaultWeekStart}~${defaultWeekEnd}`;
+  const weekGoalStart=activeWeekGoal?.start||defaultWeekStart, weekGoalEnd=activeWeekGoal?.end||defaultWeekEnd;
   async function savePeriodGoal(type,key,content){
     const id=`${type}:${key}`,clean=(content||'').trim();
     setPeriodGoals(prev=>({...prev,[id]:clean}));
     if(supabase&&user){const {error}=await supabase.from('study_period_goals').upsert({user_id:user.id,goal_type:type,period_key:key,content:clean},{onConflict:'user_id,goal_type,period_key'});if(error){setMessage('목표를 클라우드에 저장하지 못했어요. 최신 SQL 설정을 확인해 주세요.');return;}}
     setGoalDrafts(prev=>({...prev,[id]:clean}));setMessage('목표를 저장했어요.');
+  }
+  async function saveWeeklyGoal(oldKey,start,end,content){
+    if(!start||!end){setMessage('시작 날짜와 종료 날짜를 선택해 주세요.');return;}
+    if(start>end){setMessage('종료 날짜는 시작 날짜와 같거나 이후여야 해요.');return;}
+    const newKey=`week:${start}~${end}`, newPeriodKey=`${start}~${end}`, clean=(content||'').trim();
+
+    // Save the new period first so the existing goal is preserved if saving fails.
+    if(supabase&&user){
+      const {error}=await supabase.from('study_period_goals').upsert(
+        {user_id:user.id,goal_type:'week',period_key:newPeriodKey,content:clean},
+        {onConflict:'user_id,goal_type,period_key'}
+      );
+      if(error){setMessage('주간 목표를 클라우드에 저장하지 못했어요: '+error.message);return;}
+
+      // Remove the old period only after the new one has been saved successfully.
+      if(oldKey&&oldKey!==newKey){
+        const oldPeriodKey=oldKey.slice(5);
+        const {error:deleteError}=await supabase.from('study_period_goals').delete()
+          .eq('user_id',user.id).eq('goal_type','week').eq('period_key',oldPeriodKey);
+        if(deleteError){setMessage('새 목표는 저장했지만 이전 기간의 목표 정리는 실패했어요. 새로고침 후 확인해 주세요.');return;}
+      }
+    }
+
+    setPeriodGoals(prev=>{const next={...prev};if(oldKey&&oldKey!==newKey)delete next[oldKey];next[newKey]=clean;return next;});
+    setGoalDrafts(prev=>({...prev,[newKey]:clean}));
+    setSelectedDate(start);
+    setMessage('주간 목표와 날짜를 저장했어요.');
   }
   async function saveTask(task){
     const clean={...task,title:task.title.trim(),subject:(task.subject||'').trim(),note:(task.note||'').trim()};
@@ -112,7 +146,7 @@ function App(){
       <section className="date-navigation"><button className="icon-btn" onClick={()=>moveDate(-1)} aria-label="이전"><ChevronLeft size={20}/></button><div className="date-heading">{view==='year'?`${year}년 달력`:view==='month'?monthLabel:`${month}월 ${day}일`}<small>{view==='daily'?weekday:view==='month'?'날짜별 과목과 완료 상태':'월을 선택해 상세 달력 보기'}</small></div><button className="icon-btn" onClick={()=>moveDate(1)} aria-label="다음"><ChevronRight size={20}/></button><button className="today-btn" onClick={()=>{setSelectedDate(todayISO());if(view==='year')setView('year')}}>오늘</button></section>
 
       {view==='daily'&&<>
-        <GoalEditor title="이번 주 목표" subtitle={`${weekRangeLabel(selectedDate)} · 월요일부터 일요일`} icon="week" value={periodGoals[weekGoalKey]||''} draft={goalDrafts[weekGoalKey]} onDraft={v=>setGoalDrafts(prev=>({...prev,[weekGoalKey]:v}))} onSave={v=>savePeriodGoal('week',weekStartKey(selectedDate),v)} />
+        <WeeklyGoalEditor key={weekGoalKey} title="주간 목표" subtitle="기간은 원하는 날짜로 직접 설정할 수 있어요." value={periodGoals[weekGoalKey]||''} initialStart={weekGoalStart} initialEnd={weekGoalEnd} onSave={(start,end,content)=>saveWeeklyGoal(weekGoalKey,start,end,content)} />
         <section className="section-head daily-section-head"><div><div className="eyebrow">DAILY STUDY NOTES</div><h2>오늘의 공부 목록</h2></div><button className="add-btn" onClick={()=>openNewTask()}><Plus size={17}/> 추가</button></section>
         <TaskList tasks={dayTasks} toggleTask={toggleTask} editTask={t=>{setDraft({...t});setModal('task')}} deleteTask={deleteTask}/>
         <section className="quote-card"><div className="quote-icon"><Sprout size={19}/></div><div><strong>오늘의 작은 성취도 충분해요.</strong><p>한 가지씩 기록하며 나만의 공부 습관을 만들어 봐요.</p></div></section>
@@ -120,13 +154,13 @@ function App(){
 
       {view==='month'&&<>
         <GoalEditor title={`${month}월 목표`} subtitle="이번 달에 이루고 싶은 공부 목표" icon="month" value={periodGoals[monthGoalKey]||''} draft={goalDrafts[monthGoalKey]} onDraft={v=>setGoalDrafts(prev=>({...prev,[monthGoalKey]:v}))} onSave={v=>savePeriodGoal('month',`${year}-${String(month).padStart(2,'0')}`,v)} />
-        <GoalEditor title="이번 주 목표" subtitle={`${weekRangeLabel(selectedDate)} · 선택한 날짜가 포함된 주`} icon="week" value={periodGoals[weekGoalKey]||''} draft={goalDrafts[weekGoalKey]} onDraft={v=>setGoalDrafts(prev=>({...prev,[weekGoalKey]:v}))} onSave={v=>savePeriodGoal('week',weekStartKey(selectedDate),v)} />
-        <MonthCalendar year={year} month={month} selectedDate={selectedDate} tasks={data.tasks} onSelect={selectDay}/>
+        <WeeklyGoalEditor key={weekGoalKey} title="주간 목표" subtitle="시작일과 종료일을 직접 수정할 수 있어요." value={periodGoals[weekGoalKey]||''} initialStart={weekGoalStart} initialEnd={weekGoalEnd} onSave={(start,end,content)=>saveWeeklyGoal(weekGoalKey,start,end,content)} />
+        <MonthCalendar year={year} month={month} selectedDate={selectedDate} tasks={data.tasks} periodGoals={periodGoals} onSelect={selectDay}/>
         <section className="section-head"><div><div className="eyebrow">STUDY NOTES</div><h2>{month}월의 기록</h2></div><button className="add-btn" onClick={()=>openNewTask(selectedDate)}><Plus size={17}/> 추가</button></section>
         <TaskList tasks={[...monthTasks].sort((a,b)=>a.date.localeCompare(b.date))} toggleTask={toggleTask} editTask={t=>{setDraft({...t});setModal('task')}} deleteTask={deleteTask} showDate/>
       </>}
 
-      {view==='year'&&<YearCalendar year={year} selectedDate={selectedDate} tasks={data.tasks} onSelectMonth={(m)=>{setSelectedDate(`${year}-${String(m).padStart(2,'0')}-01`);setView('month')}} onSelectDay={selectDay}/>}
+      {view==='year'&&<YearCalendar year={year} selectedDate={selectedDate} tasks={data.tasks} periodGoals={periodGoals} onSelectMonth={(m)=>{setSelectedDate(`${year}-${String(m).padStart(2,'0')}-01`);setView('month')}} onSelectDay={selectDay}/>}
 
       <footer className="app-footer"><span><Leaf size={13}/> 조금씩, 꾸준히</span><span>{loading?'불러오는 중…':cloudReady?(user?'클라우드 동기화':'Supabase 연결 설정됨'):'미리보기 모드'}</span></footer>
     </main>
@@ -148,6 +182,18 @@ function App(){
 }
 
 
+function WeeklyGoalEditor({title,subtitle,value,initialStart,initialEnd,onSave}){
+  const [editing,setEditing]=useState(false);
+  const [start,setStart]=useState(initialStart);
+  const [end,setEnd]=useState(initialEnd);
+  const [content,setContent]=useState(value||'');
+  useEffect(()=>{setStart(initialStart);setEnd(initialEnd);setContent(value||'');setEditing(false);},[initialStart,initialEnd,value]);
+  return <section className="period-goal-card">
+    <div className="period-goal-heading"><div className="period-goal-icon"><Sprout size={18}/></div><div className="period-goal-title"><strong>{title}</strong><small>{subtitle}</small></div><button className="goal-edit-btn" onClick={()=>setEditing(v=>!v)}>{editing?'닫기':value?'수정':'목표 입력'}</button></div>
+    {editing?<div className="period-goal-editor"><div className="goal-date-range"><label>시작일<input type="date" value={start} onChange={e=>setStart(e.target.value)}/></label><label>종료일<input type="date" value={end} min={start} onChange={e=>setEnd(e.target.value)}/></label></div><textarea rows="3" value={content} onChange={e=>setContent(e.target.value)} placeholder="예: 이번 주 강의 3개 듣고 복습하기"/><button className="primary-btn" onClick={()=>{onSave(start,end,content);setEditing(false)}}>주간 목표 저장</button></div>:<><p className={`period-goal-text ${value?'':'is-empty'}`}>{value||'아직 목표가 없어요. 목표와 기간을 설정해 보세요.'}</p><div className="weekly-goal-range">{weekRangeLabel(initialStart,initialEnd)}</div></>}
+  </section>;
+}
+
 function GoalEditor({title,subtitle,icon,value,draft,onDraft,onSave}){
   const [editing,setEditing]=useState(false);
   const current=draft===undefined?value:draft;
@@ -157,29 +203,34 @@ function GoalEditor({title,subtitle,icon,value,draft,onDraft,onSave}){
   </section>;
 }
 
-function MonthCalendar({year,month,selectedDate,tasks,onSelect}){
+function MonthCalendar({year,month,selectedDate,tasks,periodGoals,onSelect}){
+  const weeklyGoals=weeklyGoalList(periodGoals);
   const firstDay=new Date(year,month-1,1).getDay();
   const days= new Date(year,month,0).getDate();
   return <section className="calendar-card month-calendar-card"><div className="weekdays">{['일','월','화','수','목','금','토'].map((w,i)=><span key={w} className={i===0?'sun':i===6?'sat':''}>{w}</span>)}</div><div className="calendar-grid">{Array.from({length:firstDay},(_,i)=><div key={'blank'+i}/>)}{Array.from({length:days},(_,i)=>{
     const n=i+1,key=`${year}-${String(month).padStart(2,'0')}-${String(n).padStart(2,'0')}`;
     const items=tasks.filter(t=>t.date===key),done=items.length>0&&items.every(t=>t.completed);
+    const dayWeekGoals=weeklyGoals.filter(g=>g.start<=key&&g.end>=key);
     return <button key={key} className={`calendar-day month-detail-day ${key===selectedDate?'selected':''} ${key===todayISO()?'today':''}`} onClick={()=>onSelect(key)}>
       <span className="calendar-day-number">{n}</span>
       {items.length>0&&<span className="calendar-subjects">{items.slice(0,2).map((t,j)=><span key={t.id} className={`calendar-subject ${subjectColor[j%subjectColor.length]}`}>{t.title}</span>)}</span>}
+      {dayWeekGoals.length>0&&<span className="calendar-week-goal" title={dayWeekGoals.map(g=>g.content).join(' · ')}>주간: {dayWeekGoals[0].content}</span>}
       {items.length>0&&<i className={done?'done-dot':''}/> }
     </button>;
   })}</div><div className="calendar-legend"><span><i/> 공부 기록 있음</span><span><i className="done-dot"/> 모든 목표 완료</span></div></section>;
 }
 
-function YearCalendar({year,selectedDate,tasks,onSelectMonth,onSelectDay}){
+function YearCalendar({year,selectedDate,tasks,periodGoals,onSelectMonth,onSelectDay}){
   return <section className="year-calendar-grid">{Array.from({length:12},(_,i)=>{
     const month=i+1,firstDay=new Date(year,month-1,1).getDay(),days=new Date(year,month,0).getDate();
+    const monthGoal=periodGoals[`month:${year}-${String(month).padStart(2,'0')}`]||'';
     return <article className="mini-month" key={month}>
       <button className="mini-month-title" onClick={()=>onSelectMonth(month)}>{month}월 <ChevronRight size={13}/></button>
+      <div className={`mini-month-goal ${monthGoal?'has-month-goal':''}`} title={monthGoal||'월간 목표 없음'}>{monthGoal||'월간 목표 없음'}</div>
       <div className="mini-weekdays">{['일','월','화','수','목','금','토'].map((w,j)=><span key={w} className={j===0?'sun':j===6?'sat':''}>{w}</span>)}</div>
       <div className="mini-days">{Array.from({length:firstDay},(_,j)=><span key={`b${j}`}/>)}{Array.from({length:days},(_,j)=>{
         const d=j+1,key=`${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`,items=tasks.filter(t=>t.date===key),done=items.length>0&&items.every(t=>t.completed);
-        return <button key={key} className={`mini-day ${key===todayISO()?'mini-today':''} ${key===selectedDate?'mini-selected':''} ${items.length?'has-study':''} ${done?'mini-done':''}`} onClick={()=>onSelectDay(key)} title={items.map(t=>t.title).join('\n')||key}>{d}</button>;
+        return <button key={key} className={`mini-day ${key===todayISO()?'mini-today':''} ${key===selectedDate?'mini-selected':''} ${items.length?'has-study':''} ${done?'mini-done':''}`} onClick={()=>onSelectDay(key)} title={items.map(t=>`${t.subject||'기타'}: ${t.title}`).join('\n')||key}>{d}</button>;
       })}</div>
     </article>;
   })}</section>;
