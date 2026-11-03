@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
-import { CalendarDays, CalendarRange, Check, ChevronLeft, ChevronRight, Leaf, ListTodo, Plus, Sprout, Settings2, Trash2, BookOpen, X } from 'lucide-react';
+import { CalendarDays, CalendarRange, Check, ChevronLeft, ChevronRight, Leaf, ListTodo, Plus, Sprout, Settings2, Trash2, BookOpen, X, Star, Search, StickyNote, Pencil } from 'lucide-react';
 import './styles.css';
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -21,6 +21,12 @@ const sample = () => ({ tasks: [
 const subjectColor = ['subject-sage','subject-sand','subject-rose','subject-blue'];
 function App(){
   const [view,setView]=useState('daily');
+  const [memos,setMemos]=useState([]);
+  const [memoDraft,setMemoDraft]=useState({title:'',content:'',subject:''});
+  const [editingMemoId,setEditingMemoId]=useState(null);
+  const [memoSearch,setMemoSearch]=useState('');
+  const [memoSubjectFilter,setMemoSubjectFilter]=useState('전체');
+  const [memoEditorOpen,setMemoEditorOpen]=useState(false);
   const [selectedDate,setSelectedDate]=useState(todayISO());
   const [data,setData]=useState(sample);
   const [periodGoals,setPeriodGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem('study-planner-period-goals')||'{}')}catch{return {}}});
@@ -45,7 +51,7 @@ function App(){
     try{localStorage.setItem('study-planner-period-goals',JSON.stringify(periodGoals));}catch{}
   },[periodGoals]);
   useEffect(()=>{
-    if(!supabase||!user){if(!user)setData(d=>d||sample());return;}
+    if(!supabase||!user){if(!user){setData(d=>d||sample());setMemos([]);}return;}
     (async()=>{
       setLoading(true);
       const {data:rows,error}=await supabase.from('study_tasks').select('*').order('study_date');
@@ -53,6 +59,9 @@ function App(){
       else setMessage('클라우드 데이터를 불러오지 못했어요. Supabase 설정과 SQL 실행 여부를 확인해 주세요.');
       const goalResult=await supabase.from('study_period_goals').select('goal_type,period_key,content');
       if(!goalResult.error){const cloudGoals={};goalResult.data.forEach(g=>{cloudGoals[`${g.goal_type}:${g.period_key}`]=g.content});setPeriodGoals(prev=>({...Object.fromEntries(Object.entries(prev).filter(([key])=>!key.startsWith('week:'))),...cloudGoals}));}
+      const memoResult=await supabase.from('study_memos').select('*').order('is_favorite',{ascending:false}).order('updated_at',{ascending:false});
+      if(!memoResult.error)setMemos(memoResult.data||[]);
+      else setMessage('메모를 불러오지 못했어요. Supabase에서 study_memos 테이블 SQL을 실행했는지 확인해 주세요.');
       setLoading(false);
     })();
   },[user]);
@@ -119,6 +128,34 @@ function App(){
     if(supabase&&user){const {error}=await supabase.from('study_tasks').delete().eq('id',task.id);if(error){setMessage('삭제에 실패했어요.');return;}}
     setData(d=>({...d,tasks:d.tasks.filter(t=>t.id!==task.id)}));
   }
+  function resetMemoEditor(){setMemoDraft({title:'',content:'',subject:''});setEditingMemoId(null);setMemoEditorOpen(false);}
+  function startNewMemo(){setMemoDraft({title:'',content:'',subject:''});setEditingMemoId(null);setMemoEditorOpen(true);}
+  function startEditMemo(memo){setMemoDraft({title:memo.title||'',content:memo.content||'',subject:memo.subject||''});setEditingMemoId(memo.id);setMemoEditorOpen(true);}
+  async function saveMemo(){
+    const clean={title:memoDraft.title.trim(),content:memoDraft.content.trim(),subject:memoDraft.subject.trim()};
+    if(!clean.title&&!clean.content){setMessage('메모 제목이나 내용을 입력해 주세요.');return;}
+    if(!supabase||!user){setMessage('메모를 클라우드에 저장하려면 먼저 계정에 로그인해 주세요.');return;}
+    const payload={...clean,user_id:user.id,updated_at:new Date().toISOString()};
+    const result=editingMemoId
+      ? await supabase.from('study_memos').update(payload).eq('id',editingMemoId).select().single()
+      : await supabase.from('study_memos').insert({...payload,is_favorite:false}).select().single();
+    if(result.error){setMessage('메모 저장에 실패했어요: '+result.error.message);return;}
+    setMemos(prev=>editingMemoId?prev.map(m=>m.id===editingMemoId?result.data:m):[result.data,...prev]);
+    resetMemoEditor();setMessage('메모를 저장했어요.');
+  }
+  async function toggleMemoFavorite(memo){
+    if(!supabase||!user){setMessage('즐겨찾기를 사용하려면 먼저 로그인해 주세요.');return;}
+    const {data:updated,error}=await supabase.from('study_memos').update({is_favorite:!memo.is_favorite,updated_at:new Date().toISOString()}).eq('id',memo.id).select().single();
+    if(error){setMessage('즐겨찾기를 변경하지 못했어요: '+error.message);return;}
+    setMemos(prev=>prev.map(m=>m.id===memo.id?updated:m));
+  }
+  async function deleteMemo(memo){
+    if(!supabase||!user)return;
+    if(!window.confirm('이 메모를 삭제할까요?'))return;
+    const {error}=await supabase.from('study_memos').delete().eq('id',memo.id);
+    if(error){setMessage('메모 삭제에 실패했어요: '+error.message);return;}
+    setMemos(prev=>prev.filter(m=>m.id!==memo.id));if(editingMemoId===memo.id)resetMemoEditor();setMessage('메모를 삭제했어요.');
+  }
   async function auth(action){
     if(!supabase){setMessage('.env 파일에 Supabase URL과 키를 설정해 주세요.');return;}
     setLoading(true);
@@ -141,9 +178,9 @@ function App(){
   return <div className="app-shell">
     <header className="topbar"><div className="brand"><div className="brand-mark"><Sprout size={22}/></div><div><div className="brand-name">차곡차곡</div><div className="brand-sub">작은 공부가 쌓이는 곳</div></div></div><button className="icon-btn settings" onClick={()=>setAuthOpen(true)} aria-label="설정"><Settings2 size={19}/></button></header>
     <main>
-      <section className="greeting"><div className="eyebrow"><Leaf size={14}/> YOUR STUDY JOURNAL</div><h1>{view==='daily'?'오늘의 공부를,':view==='month'?'달력으로 살펴봐요,':'한 해의 달력을 한눈에,'}<br/><span>{view==='daily'?'차곡차곡 기록해요.':view==='month'?'하루씩 채워가요.':'나만의 속도로 가요.'}</span></h1><p>공부한 과목을 기록하고, 끝낸 목표에 체크해 보세요.</p></section>
-      <section className="view-switch" aria-label="플래너 화면 선택"><button className={view==='year'?'active':''} onClick={()=>setView('year')}><CalendarRange size={16}/> 연간</button><button className={view==='month'?'active':''} onClick={()=>setView('month')}><CalendarDays size={16}/> 월간</button><button className={view==='daily'?'active':''} onClick={()=>setView('daily')}><ListTodo size={16}/> 일간</button></section>
-      <section className="date-navigation"><button className="icon-btn" onClick={()=>moveDate(-1)} aria-label="이전"><ChevronLeft size={20}/></button><div className="date-heading">{view==='year'?`${year}년 달력`:view==='month'?monthLabel:`${month}월 ${day}일`}<small>{view==='daily'?weekday:view==='month'?'날짜별 과목과 완료 상태':'월을 선택해 상세 달력 보기'}</small></div><button className="icon-btn" onClick={()=>moveDate(1)} aria-label="다음"><ChevronRight size={20}/></button><button className="today-btn" onClick={()=>{setSelectedDate(todayISO());if(view==='year')setView('year')}}>오늘</button></section>
+      <section className="greeting"><div className="eyebrow"><Leaf size={14}/> YOUR STUDY JOURNAL</div><h1>{view==='daily'?'오늘의 공부를,':view==='month'?'달력으로 살펴봐요,':view==='memo'?'생각을 자유롭게 적어봐요,':'한 해의 달력을 한눈에,'}<br/><span>{view==='daily'?'차곡차곡 기록해요.':view==='month'?'하루씩 채워가요.':view==='memo'?'나만의 공부 노트를 만들어요.':'나만의 속도로 가요.'}</span></h1><p>공부 기록과 목표, 떠오른 생각까지 차곡차곡 쌓아 보세요.</p></section>
+      <section className="view-switch" aria-label="플래너 화면 선택"><button className={view==='year'?'active':''} onClick={()=>setView('year')}><CalendarRange size={16}/> 연간</button><button className={view==='month'?'active':''} onClick={()=>setView('month')}><CalendarDays size={16}/> 월간</button><button className={view==='daily'?'active':''} onClick={()=>setView('daily')}><ListTodo size={16}/> 일간</button><button className={view==='memo'?'active':''} onClick={()=>setView('memo')}><StickyNote size={16}/> 메모</button></section>
+      {view!=='memo'&&<section className="date-navigation"><button className="icon-btn" onClick={()=>moveDate(-1)} aria-label="이전"><ChevronLeft size={20}/></button><div className="date-heading">{view==='year'?`${year}년 달력`:view==='month'?monthLabel:`${month}월 ${day}일`}<small>{view==='daily'?weekday:view==='month'?'날짜별 과목과 완료 상태':'월을 선택해 상세 달력 보기'}</small></div><button className="icon-btn" onClick={()=>moveDate(1)} aria-label="다음"><ChevronRight size={20}/></button><button className="today-btn" onClick={()=>{setSelectedDate(todayISO());if(view==='year')setView('year')}}>오늘</button></section>}
 
       {view==='daily'&&<>
         <WeeklyGoalEditor key={weekGoalKey} title="주간 목표" subtitle="기간은 원하는 날짜로 직접 설정할 수 있어요." value={periodGoals[weekGoalKey]||''} initialStart={weekGoalStart} initialEnd={weekGoalEnd} onSave={(start,end,content)=>saveWeeklyGoal(weekGoalKey,start,end,content)} />
@@ -162,9 +199,10 @@ function App(){
 
       {view==='year'&&<YearCalendar year={year} selectedDate={selectedDate} tasks={data.tasks} periodGoals={periodGoals} onSelectMonth={(m)=>{setSelectedDate(`${year}-${String(m).padStart(2,'0')}-01`);setView('month')}} onSelectDay={selectDay}/>}
 
+      {view==='memo'&&<MemoPage memos={memos} user={user} search={memoSearch} setSearch={setMemoSearch} subjectFilter={memoSubjectFilter} setSubjectFilter={setMemoSubjectFilter} editorOpen={memoEditorOpen} draft={memoDraft} setDraft={setMemoDraft} editingMemoId={editingMemoId} onNew={startNewMemo} onEdit={startEditMemo} onSave={saveMemo} onCancel={resetMemoEditor} onFavorite={toggleMemoFavorite} onDelete={deleteMemo}/>}
       <footer className="app-footer"><span><Leaf size={13}/> 조금씩, 꾸준히</span><span>{loading?'불러오는 중…':cloudReady?(user?'클라우드 동기화':'Supabase 연결 설정됨'):'미리보기 모드'}</span></footer>
     </main>
-    <nav className="bottom-nav"><button className={view==='year'?'nav-active':''} onClick={()=>setView('year')}><CalendarRange size={19}/><span>연간</span></button><button className={view==='month'?'nav-active':''} onClick={()=>setView('month')}><CalendarDays size={19}/><span>월간</span></button><button className={view==='daily'?'nav-active':''} onClick={()=>setView('daily')}><BookOpen size={19}/><span>일간</span></button><button onClick={()=>setAuthOpen(true)}><Settings2 size={19}/><span>계정</span></button></nav>
+    <nav className="bottom-nav"><button className={view==='year'?'nav-active':''} onClick={()=>setView('year')}><CalendarRange size={19}/><span>연간</span></button><button className={view==='month'?'nav-active':''} onClick={()=>setView('month')}><CalendarDays size={19}/><span>월간</span></button><button className={view==='daily'?'nav-active':''} onClick={()=>setView('daily')}><BookOpen size={19}/><span>일간</span></button><button className={view==='memo'?'nav-active':''} onClick={()=>setView('memo')}><StickyNote size={19}/><span>메모</span></button><button onClick={()=>setAuthOpen(true)}><Settings2 size={19}/><span>계정</span></button></nav>
     {message&&<div className="toast" role="status">{message}<button onClick={()=>setMessage('')}><X size={16}/></button></div>}
 
     {modal==='task'&&<div className="modal-backdrop" onClick={()=>setModal(null)}><form className="modal" onClick={e=>e.stopPropagation()} onSubmit={e=>{e.preventDefault();if(!draft.title?.trim())return setMessage('공부 목표를 입력해 주세요.');saveTask({...draft,title:draft.title.trim()})}}>
@@ -243,6 +281,34 @@ function TaskList({tasks,toggleTask,editTask,deleteTask,showDate=false}){
     <button className="task-main" onClick={()=>editTask(t)}><div className="task-title">{t.title}</div><div className="task-meta">{showDate&&<span>{t.date?.slice(5).replace('-','/')}</span>}{t.subject&&<span className="subject-pill">{t.subject}</span>}<span className={`status-pill ${t.completed?'status-done':''}`}>{t.completed?'완료':'진행 예정'}</span></div>{t.note&&<div className="task-note">{t.note}</div>}</button>
     <button className="delete-btn" onClick={()=>deleteTask(t)} aria-label="삭제"><Trash2 size={15}/></button>
   </article>)}</div>;
+}
+
+
+function MemoPage({memos,user,search,setSearch,subjectFilter,setSubjectFilter,editorOpen,draft,setDraft,editingMemoId,onNew,onEdit,onSave,onCancel,onFavorite,onDelete}){
+  const subjects=[...new Set(memos.map(m=>m.subject).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'ko'));
+  const filtered=memos.filter(m=>{
+    const matchesSubject=subjectFilter==='전체'||m.subject===subjectFilter;
+    const q=search.trim().toLowerCase();
+    const matchesSearch=!q||`${m.title||''} ${m.content||''} ${m.subject||''}`.toLowerCase().includes(q);
+    return matchesSubject&&matchesSearch;
+  }).sort((a,b)=>Number(!!b.is_favorite)-Number(!!a.is_favorite)||new Date(b.updated_at||b.created_at)-new Date(a.updated_at||a.created_at));
+  return <section className="memo-page">
+    <div className="memo-toolbar"><div><div className="eyebrow">MY STUDY MEMOS</div><h2>나의 메모</h2><p>공부하다 떠오른 생각을 자유롭게 기록해 보세요.</p></div><button className="add-btn" onClick={onNew}><Plus size={17}/> 새 메모</button></div>
+    {!user&&<div className="memo-login-notice">메모를 저장하고 아이폰과 PC에서 함께 보려면 우측 상단 계정 메뉴에서 로그인해 주세요.</div>}
+    <label className="memo-search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="메모 제목이나 내용 검색"/></label>
+    <div className="memo-filters"><button className={subjectFilter==='전체'?'selected':''} onClick={()=>setSubjectFilter('전체')}>전체</button>{subjects.map(subject=><button key={subject} className={subjectFilter===subject?'selected':''} onClick={()=>setSubjectFilter(subject)}>{subject}</button>)}</div>
+    {editorOpen&&<div className="memo-editor-card"><div className="memo-editor-heading"><strong>{editingMemoId?'메모 수정':'새 메모 작성'}</strong><button className="icon-btn" onClick={onCancel} aria-label="닫기"><X size={17}/></button></div>
+      <label>제목<input value={draft.title} onChange={e=>setDraft({...draft,title:e.target.value})} placeholder="메모 제목을 입력해 주세요"/></label>
+      <label>과목<input value={draft.subject} onChange={e=>setDraft({...draft,subject:e.target.value})} placeholder="예: 노동경제학, 영어, 심리학"/></label>
+      <label>내용<textarea rows="7" value={draft.content} onChange={e=>setDraft({...draft,content:e.target.value})} placeholder="자유롭게 메모를 작성해 보세요."/></label>
+      <div className="memo-editor-actions"><button className="secondary-btn" onClick={onCancel}>취소</button><button className="primary-btn" onClick={onSave}>저장하기</button></div>
+    </div>}
+    {!filtered.length?<div className="empty-state memo-empty"><div className="empty-icon"><StickyNote size={24}/></div><strong>{memos.length?'검색 결과가 없어요.':'아직 작성한 메모가 없어요.'}</strong><p>새 메모를 눌러 첫 번째 공부 노트를 만들어 보세요.</p></div>:<div className="memo-list">{filtered.map(m=><article className={`memo-card ${m.is_favorite?'memo-favorite':''}`} key={m.id}>
+      <div className="memo-card-top"><div className="memo-card-title">{m.title||'제목 없는 메모'}</div><button className={`memo-star ${m.is_favorite?'active':''}`} onClick={()=>onFavorite(m)} aria-label={m.is_favorite?'즐겨찾기 해제':'즐겨찾기'}><Star size={18} fill={m.is_favorite?'currentColor':'none'}/></button></div>
+      {m.subject&&<span className="memo-subject">{m.subject}</span>}<p className="memo-content">{m.content}</p>
+      <div className="memo-card-bottom"><small>{new Date(m.updated_at||m.created_at).toLocaleDateString('ko-KR')}</small><div><button onClick={()=>onEdit(m)}><Pencil size={14}/> 수정</button><button onClick={()=>onDelete(m)}><Trash2 size={14}/> 삭제</button></div></div>
+    </article>)}</div>}
+  </section>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);
